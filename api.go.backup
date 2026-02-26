@@ -1,0 +1,335 @@
+package main
+
+import (
+	"fmt"
+
+	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/jefeish/gh-repo-transfer/internal/types"
+)
+
+func getRepositorySettings(client api.RESTClient, owner, repo string, governance *types.GovernanceConfig) error {
+	var repoData struct {
+		Private             bool   `json:"private"`
+		Archived            bool   `json:"archived"`
+		Disabled            bool   `json:"disabled"`
+		DefaultBranch       string `json:"default_branch"`
+		AllowMergeCommit    bool   `json:"allow_merge_commit"`
+		AllowSquashMerge    bool   `json:"allow_squash_merge"`
+		AllowRebaseMerge    bool   `json:"allow_rebase_merge"`
+		AllowAutoMerge      bool   `json:"allow_auto_merge"`
+		DeleteBranchOnMerge bool   `json:"delete_branch_on_merge"`
+		HasIssues           bool   `json:"has_issues"`
+		HasProjects         bool   `json:"has_projects"`
+		HasWiki             bool   `json:"has_wiki"`
+		HasDownloads        bool   `json:"has_downloads"`
+	}
+
+	err := client.Get(fmt.Sprintf("repos/%s/%s", owner, repo), &repoData)
+	if err != nil {
+		return err
+	}
+
+	governance.RepoSettings = types.RepoSettings{
+		Private:             repoData.Private,
+		Archived:            repoData.Archived,
+		Disabled:            repoData.Disabled,
+		DefaultBranch:       repoData.DefaultBranch,
+		AllowMergeCommit:    repoData.AllowMergeCommit,
+		AllowSquashMerge:    repoData.AllowSquashMerge,
+		AllowRebaseMerge:    repoData.AllowRebaseMerge,
+		AllowAutoMerge:      repoData.AllowAutoMerge,
+		DeleteBranchOnMerge: repoData.DeleteBranchOnMerge,
+		HasIssues:           repoData.HasIssues,
+		HasProjects:         repoData.HasProjects,
+		HasWiki:             repoData.HasWiki,
+		HasDownloads:        repoData.HasDownloads,
+	}
+
+	return nil
+}
+
+func getRulesets(client api.RESTClient, owner, repo string, governance *types.GovernanceConfig) error {
+	// First try to get repository rulesets (newer API)
+	var rulesets struct {
+		Rulesets []struct {
+			ID     int    `json:"id"`
+			Name   string `json:"name"`
+			Target string `json:"target"`
+			Rules  []struct {
+				Type       string `json:"type"`
+				Parameters struct {
+					RequiredStatusChecks []struct {
+						Context string `json:"context"`
+					} `json:"required_status_checks,omitempty"`
+					RequiredApprovingReviewCount int  `json:"required_approving_review_count,omitempty"`
+					DismissStaleReviews          bool `json:"dismiss_stale_reviews,omitempty"`
+					RequireCodeOwnerReviews      bool `json:"require_code_owner_reviews,omitempty"`
+					RequireLinearHistory         bool `json:"require_linear_history,omitempty"`
+				} `json:"parameters,omitempty"`
+			} `json:"rules"`
+			Conditions struct {
+				RefName struct {
+					Include []string `json:"include"`
+					Exclude []string `json:"exclude"`
+				} `json:"ref_name"`
+			} `json:"conditions"`
+		} `json:"rulesets"`
+	}
+
+	err := client.Get(fmt.Sprintf("repos/%s/%s/rulesets", owner, repo), &rulesets)
+	if err != nil {
+		// Fallback to branch protection if rulesets API fails
+		return getBranchProtection(client, owner, repo, governance)
+	}
+
+	// Convert rulesets to our format
+	for _, ruleset := range rulesets.Rulesets {
+		// Determine pattern from conditions
+		pattern := "*" // default
+		if len(ruleset.Conditions.RefName.Include) > 0 {
+			pattern = ruleset.Conditions.RefName.Include[0] // Use first include pattern
+		}
+
+		// Initialize ruleset with default values
+		rulesetObj := types.Ruleset{
+			ID:          ruleset.ID,
+			Name:        ruleset.Name,
+			Target:      ruleset.Target,
+			Enforcement: ruleset.Enforcement,
+			Source:      ruleset.Source,
+		}
+
+		// Add to governance (rules processing removed for now as Ruleset structure doesn't support these fields)
+
+		governance.Rulesets = append(governance.Rulesets, rulesetObj)
+	}
+
+	return nil
+}
+
+func getBranchProtection(client api.RESTClient, owner, repo string, governance *types.GovernanceConfig) error {
+	// First, get all branches
+	var branches []struct {
+		Name      string `json:"name"`
+		Protected bool   `json:"protected"`
+	}
+
+	err := client.Get(fmt.Sprintf("repos/%s/%s/branches", owner, repo), &branches)
+	if err != nil {
+		return err
+	}
+
+	// Get protection rules for protected branches
+	for _, branch := range branches {
+		if !branch.Protected {
+			continue
+		}
+
+		var protection struct {
+			EnforceAdmins struct {
+				Enabled bool `json:"enabled"`
+			} `json:"enforce_admins"`
+			RequiredStatusChecks struct {
+				Strict   bool     `json:"strict"`
+				Contexts []string `json:"contexts"`
+				Checks   []struct {
+					Context string `json:"context"`
+					AppID   int    `json:"app_id"`
+				} `json:"checks"`
+			} `json:"required_status_checks"`
+			RequiredPullRequestReviews struct {
+				RequiredApprovingReviewCount   int  `json:"required_approving_review_count"`
+				DismissStaleReviews            bool `json:"dismiss_stale_reviews"`
+				RequireCodeOwnerReviews        bool `json:"require_code_owner_reviews"`
+				RequiredLinearHistory          bool `json:"required_linear_history"`
+				RequireConversationResolution  bool `json:"require_conversation_resolution"`
+			} `json:"required_pull_request_reviews"`
+			Restrictions struct {
+				Users []struct {
+					Login string `json:"login"`
+				} `json:"users"`
+				Teams []struct {
+					Slug string `json:"slug"`
+				} `json:"teams"`
+			} `json:"restrictions"`
+			AllowForcePushes struct {
+				Enabled bool `json:"enabled"`
+			} `json:"allow_force_pushes"`
+			AllowDeletions struct {
+				Enabled bool `json:"enabled"`
+			} `json:"allow_deletions"`
+		}
+
+		err := client.Get(fmt.Sprintf("repos/%s/%s/branches/%s/protection", owner, repo, branch.Name), &protection)
+		if err != nil {
+			// Skip if protection info is not accessible
+			continue
+		}
+
+		// Combine contexts and checks
+		var requiredChecks []string
+		requiredChecks = append(requiredChecks, protection.RequiredStatusChecks.Contexts...)
+		for _, check := range protection.RequiredStatusChecks.Checks {
+			requiredChecks = append(requiredChecks, check.Context)
+		}
+
+		ruleset := Ruleset{
+			Name:                            fmt.Sprintf("%s Branch Protection", branch.Name),
+			Pattern:                         branch.Name,
+			EnforceAdmins:                   protection.EnforceAdmins.Enabled,
+			RequiredStatusChecks:            requiredChecks,
+			RequiredPullRequestReviews:      protection.RequiredPullRequestReviews.RequiredApprovingReviewCount > 0,
+			RequiredApprovingReviewCount:    protection.RequiredPullRequestReviews.RequiredApprovingReviewCount,
+			DismissStaleReviews:             protection.RequiredPullRequestReviews.DismissStaleReviews,
+			RequireCodeOwnerReviews:         protection.RequiredPullRequestReviews.RequireCodeOwnerReviews,
+			RequiredLinearHistory:           protection.RequiredPullRequestReviews.RequiredLinearHistory,
+			AllowForcePushes:                protection.AllowForcePushes.Enabled,
+			AllowDeletions:                  protection.AllowDeletions.Enabled,
+			RequiredConversationResolution:  protection.RequiredPullRequestReviews.RequireConversationResolution,
+		}
+
+		governance.Rulesets = append(governance.Rulesets, ruleset)
+		governance.RequiredChecks = append(governance.RequiredChecks, requiredChecks...)
+	}
+
+	return nil
+}
+
+func getCollaborators(client api.RESTClient, owner, repo string, governance *types.GovernanceConfig) error {
+	var collaborators []struct {
+		Login       string `json:"login"`
+		Type        string `json:"type"`
+		Permissions struct {
+			Admin    bool `json:"admin"`
+			Maintain bool `json:"maintain"`
+			Push     bool `json:"push"`
+			Triage   bool `json:"triage"`
+			Pull     bool `json:"pull"`
+		} `json:"permissions"`
+	}
+
+	err := client.Get(fmt.Sprintf("repos/%s/%s/collaborators", owner, repo), &collaborators)
+	if err != nil {
+		return err
+	}
+
+	for _, collab := range collaborators {
+		permission := "read"
+		if collab.Permissions.Admin {
+			permission = "admin"
+		} else if collab.Permissions.Maintain {
+			permission = "maintain"
+		} else if collab.Permissions.Push {
+			permission = "write"
+		} else if collab.Permissions.Triage {
+			permission = "triage"
+		}
+
+		governance.Collaborators = append(governance.Collaborators, Collaborator{
+			Login:      collab.Login,
+			Permission: permission,
+			Type:       collab.Type,
+		})
+	}
+
+	return nil
+}
+
+func getTeams(client api.RESTClient, owner, repo string, governance *types.GovernanceConfig) error {
+	var teams []struct {
+		Name       string `json:"name"`
+		Slug       string `json:"slug"`
+		Permission string `json:"permission"`
+	}
+
+	err := client.Get(fmt.Sprintf("repos/%s/%s/teams", owner, repo), &teams)
+	if err != nil {
+		return err
+	}
+
+	for _, team := range teams {
+		governance.Teams = append(governance.Teams, Team{
+			Name:       team.Name,
+			Slug:       team.Slug,
+			Permission: team.Permission,
+		})
+	}
+
+	return nil
+}
+
+func getSecuritySettings(client api.RESTClient, owner, repo string, governance *types.GovernanceConfig) error {
+	// Get vulnerability alerts
+	var vulnAlerts struct {
+		Enabled bool `json:"enabled"`
+	}
+	err := client.Get(fmt.Sprintf("repos/%s/%s/vulnerability-alerts", owner, repo), &vulnAlerts)
+	vulnAlertsEnabled := err == nil && vulnAlerts.Enabled
+
+	// Get automated security fixes
+	var autoFixes struct {
+		Enabled bool `json:"enabled"`
+	}
+	err = client.Get(fmt.Sprintf("repos/%s/%s/automated-security-fixes", owner, repo), &autoFixes)
+	autoFixesEnabled := err == nil && autoFixes.Enabled
+
+	// Get secret scanning status (requires GraphQL or specific REST endpoint)
+	// For now, we'll set default values since these endpoints may require special permissions
+	governance.SecuritySettings = SecuritySettings{
+		VulnerabilityAlerts:          vulnAlertsEnabled,
+		AutomatedSecurityFixes:       autoFixesEnabled,
+		SecretScanning:               false, // Would need GraphQL or enterprise endpoint
+		SecretScanningPushProtection: false, // Would need GraphQL or enterprise endpoint
+		DependencyGraphEnabled:        true,  // Usually enabled by default
+	}
+
+	return nil
+}
+
+func getLabels(client api.RESTClient, owner, repo string, governance *types.GovernanceConfig) error {
+	var labels []struct {
+		Name        string `json:"name"`
+		Color       string `json:"color"`
+		Description string `json:"description"`
+	}
+
+	err := client.Get(fmt.Sprintf("repos/%s/%s/labels", owner, repo), &labels)
+	if err != nil {
+		return err
+	}
+
+	for _, label := range labels {
+		governance.IssueLabels = append(governance.IssueLabels, Label{
+			Name:        label.Name,
+			Color:       label.Color,
+			Description: label.Description,
+		})
+	}
+
+	return nil
+}
+
+func getMilestones(client api.RESTClient, owner, repo string, governance *types.GovernanceConfig) error {
+	var milestones []struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		State       string `json:"state"`
+		DueOn       string `json:"due_on"`
+	}
+
+	err := client.Get(fmt.Sprintf("repos/%s/%s/milestones?state=all", owner, repo), &milestones)
+	if err != nil {
+		return err
+	}
+
+	for _, milestone := range milestones {
+		governance.Milestones = append(governance.Milestones, Milestone{
+			Title:       milestone.Title,
+			Description: milestone.Description,
+			State:       milestone.State,
+			DueOn:       milestone.DueOn,
+		})
+	}
+
+	return nil
+}

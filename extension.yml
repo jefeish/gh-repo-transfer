@@ -1,0 +1,12 @@
+name: repo-transfer
+description: "Read-only GitHub CLI extension for discovering repository governance configuration"
+version: "1.0.0"
+author: "jefeish"
+homepage: "https://github.com/jefeish/gh-repo-transfer"
+binary: "gh-repo-transfer"
+tags:
+  - governance
+  - audit
+  - security
+  - compliance
+  - repository

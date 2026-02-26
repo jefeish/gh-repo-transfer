@@ -1,0 +1,220 @@
+package dependencies
+
+import (
+	"encoding/base64"
+	"fmt"
+	"strings"
+
+	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/jefeish/gh-repo-transfer/internal/types"
+)
+
+// AnalyzeAccessPermissions analyzes access control and permissions dependencies
+func AnalyzeAccessPermissions(client api.RESTClient, owner, repo string, deps *types.OrganizationalDependencies) error {
+	// Analyze teams with access to the repository
+	if err := analyzeTeams(client, owner, repo, deps); err != nil {
+		// Non-fatal error - might not have access to teams info
+	}
+
+	// Analyze individual collaborators
+	if err := analyzeCollaborators(client, owner, repo, deps); err != nil {
+		// Non-fatal error - might not have access to collaborators info
+	}
+
+	// Analyze CODEOWNERS file
+	if err := analyzeCODEOWNERS(client, owner, repo, deps); err != nil {
+		// Non-fatal error - CODEOWNERS might not exist
+	}
+
+	// Analyze organization roles (if accessible)
+	if err := analyzeOrganizationRoles(client, owner, repo, deps); err != nil {
+		// Non-fatal error - org roles might not be accessible
+	}
+
+	return nil
+}
+
+// analyzeTeams analyzes teams with access to the repository
+func analyzeTeams(client api.RESTClient, owner, repo string, deps *types.OrganizationalDependencies) error {
+	var teams []struct {
+		Name        string  `json:"name"`
+		Permission  string  `json:"permission"`
+		RoleName    *string `json:"role_name"` // Custom organization role
+		Permissions struct {
+			Pull  bool `json:"pull"`
+			Push  bool `json:"push"`
+			Admin bool `json:"admin"`
+		} `json:"permissions"`
+	}
+
+	err := client.Get(fmt.Sprintf("repos/%s/%s/teams", owner, repo), &teams)
+	if err != nil {
+		return err
+	}
+
+	for _, team := range teams {
+		// Determine permission/role
+		permission := team.Permission
+		if permission == "" && team.RoleName != nil && *team.RoleName != "" {
+			// Use custom role name if available
+			permission = *team.RoleName
+		} else if permission == "" {
+			// Fallback to inferring from permissions object
+			if team.Permissions.Admin {
+				permission = "admin"
+			} else if team.Permissions.Push {
+				permission = "write"
+			} else if team.Permissions.Pull {
+				permission = "read"
+			} else {
+				permission = "unknown"
+			}
+		}
+		
+		teamInfo := fmt.Sprintf("%s (%s)", team.Name, permission)
+		deps.AccessPermissions.Teams = append(deps.AccessPermissions.Teams, teamInfo)
+	}
+
+	return nil
+}
+
+// analyzeCollaborators analyzes individual collaborators
+func analyzeCollaborators(client api.RESTClient, owner, repo string, deps *types.OrganizationalDependencies) error {
+	var collaborators []struct {
+		Login       string `json:"login"`
+		Permission  string `json:"permission"`
+		Permissions struct {
+			Pull  bool `json:"pull"`
+			Push  bool `json:"push"`
+			Admin bool `json:"admin"`
+		} `json:"permissions"`
+		RoleName *string `json:"role_name"` // Custom organization role
+	}
+
+	err := client.Get(fmt.Sprintf("repos/%s/%s/collaborators", owner, repo), &collaborators)
+	if err != nil {
+		return err
+	}
+
+	for _, collab := range collaborators {
+		// Skip the owner as they're not really a "dependency"
+		if collab.Login == owner {
+			continue
+		}
+		
+		// Determine permission/role
+		permission := collab.Permission
+		if permission == "" && collab.RoleName != nil && *collab.RoleName != "" {
+			// Use custom role name if available
+			permission = *collab.RoleName
+		} else if permission == "" {
+			// Fallback to inferring from permissions object
+			if collab.Permissions.Admin {
+				permission = "admin"
+			} else if collab.Permissions.Push {
+				permission = "write"
+			} else if collab.Permissions.Pull {
+				permission = "read"
+			} else {
+				permission = "unknown"
+			}
+		}
+		
+		collabInfo := fmt.Sprintf("%s (%s)", collab.Login, permission)
+		deps.AccessPermissions.IndividualCollaborators = append(deps.AccessPermissions.IndividualCollaborators, collabInfo)
+	}
+
+	return nil
+}
+
+// analyzeCODEOWNERS analyzes the CODEOWNERS file for organizational dependencies
+func analyzeCODEOWNERS(client api.RESTClient, owner, repo string, deps *types.OrganizationalDependencies) error {
+	// Try different possible locations for CODEOWNERS
+	codeownersLocations := []string{
+		".github/CODEOWNERS",
+		"CODEOWNERS",
+		"docs/CODEOWNERS",
+	}
+
+	for _, location := range codeownersLocations {
+		var content struct {
+			Content string `json:"content"`
+		}
+
+		err := client.Get(fmt.Sprintf("repos/%s/%s/contents/%s", owner, repo, location), &content)
+		if err != nil {
+			continue
+		}
+
+		decoded, err := base64.StdEncoding.DecodeString(content.Content)
+		if err != nil {
+			continue
+		}
+
+		owners := parseCODEOWNERS(string(decoded), owner)
+		deps.AccessPermissions.CodeownersRequirements = append(deps.AccessPermissions.CodeownersRequirements, owners...)
+		break // Found CODEOWNERS file
+	}
+
+	return nil
+}
+
+// parseCODEOWNERS parses CODEOWNERS file content and extracts organizational dependencies
+func parseCODEOWNERS(content, owner string) []string {
+	var owners []string
+	lines := strings.Split(content, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Split by whitespace to get path and owners
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+
+		// Skip the path (first part) and process owners
+		for _, ownerRef := range parts[1:] {
+			if strings.HasPrefix(ownerRef, "@") {
+				ownerName := strings.TrimPrefix(ownerRef, "@")
+				
+				// Check if it's a team reference (contains organization name)
+				if strings.Contains(ownerName, "/") {
+					owners = append(owners, fmt.Sprintf("Team: @%s", ownerName))
+				} else if strings.Contains(ownerName, owner) {
+					// Organization-specific user reference
+					owners = append(owners, fmt.Sprintf("CODEOWNERS user: @%s", ownerName))
+				} else {
+					// Individual user reference
+					owners = append(owners, fmt.Sprintf("User: @%s", ownerName))
+				}
+			}
+		}
+	}
+
+	return owners
+}
+
+// analyzeOrganizationRoles analyzes custom organization roles (Enterprise feature)
+func analyzeOrganizationRoles(client api.RESTClient, owner, repo string, deps *types.OrganizationalDependencies) error {
+	// This API endpoint might not be available or might require special permissions
+	var roles []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+
+	err := client.Get(fmt.Sprintf("orgs/%s/organization-roles", owner), &roles)
+	if err != nil {
+		return err // Organization roles not accessible or not available
+	}
+
+	for _, role := range roles {
+		roleInfo := fmt.Sprintf("Custom role: %s", role.Name)
+		deps.AccessPermissions.OrganizationRoles = append(deps.AccessPermissions.OrganizationRoles, roleInfo)
+	}
+
+	return nil
+}
