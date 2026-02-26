@@ -1,5 +1,3 @@
-<img width="227" height="137" alt="WIP" src="https://github.com/user-attachments/assets/de1f99c7-9482-4b99-9b44-5368174e3a21" />
-
 # gh-repo-transfer
 
 A GitHub client utility for transferring or archiving repos, with special focus on ORG-level dependency 

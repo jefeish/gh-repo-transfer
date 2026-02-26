@@ -114,13 +114,9 @@ func getRepositoryTeams(client api.RESTClient, owner, repo string) ([]types.Team
 			}
 		}
 
-	// Check if team is IdP-controlled (LDAP/SAML synced)
-	isIdpControlled := team.LdapDn != nil && *team.LdapDn != ""
-
 		result = append(result, types.Team{
-		Name:            team.Name,
-		Permission:      permission,
-		IsIdpControlled: isIdpControlled,
+			Name:       team.Name,
+			Permission: permission,
 		})
 	}
 

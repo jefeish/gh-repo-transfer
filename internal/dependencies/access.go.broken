@@ -79,13 +79,6 @@ func analyzeTeams(client api.RESTClient, owner, repo string, deps *types.Organiz
 	}
 	
 	teamInfo := fmt.Sprintf("%s (%s)%s", team.Name, permission, idpIndicator)
-	deps.AccessPermissions.Teams = append(deps.AccessPermissions.Teams, teamInfo)
-	}
-
-	return nil
-}
-
-// analyzeCollaborators analyzes individual collaborators
 func analyzeCollaborators(client api.RESTClient, owner, repo string, deps *types.OrganizationalDependencies) error {
 	var collaborators []struct {
 		Login       string `json:"login"`

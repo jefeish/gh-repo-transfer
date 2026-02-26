@@ -97,3 +97,11 @@ github-innersource/gh-repo-inspect-test-main -t jester-lab
 ```
 ./gh-repo-transfer transfer github-innersource/gh-repo-inspect-test-main -t jester-lab --assign --create --enforce
 ```
+
+---
+
+## Archive Repo from ORG `A` to ORG `B`
+
+```
+./gh-repo-transfer archive github-innersource/gh-repo-inspect-test-main -t jester-lab 
+```

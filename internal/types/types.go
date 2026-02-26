@@ -196,8 +196,9 @@ type Collaborator struct {
 }
 
 type Team struct {
-	Name        string `json:"name" yaml:"name"`
-	Permission  string `json:"permission" yaml:"permission"`
+	Name            string `json:"name" yaml:"name"`
+	Permission      string `json:"permission" yaml:"permission"`
+	IsIdpControlled bool   `json:"is_idp_controlled" yaml:"is_idp_controlled"`
 }
 
 type Label struct {
